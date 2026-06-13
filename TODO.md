@@ -1,13 +1,10 @@
-To do list:
-
 Phases 1 - 4:
-
     Starting page:
     - Displays time, day, date, and pre-set alarm time (7AM) hold joystick 3s to go to sleeping page.
     to do:
     1. Add page that allows user to set alarm
     2. Change time to 12 hour clock and add AM/PM
-    3. for future, add animations nad make look nice. 
+    3. for future, add animations and make look nice. 
 
     Sleeping page: 
     - Displays ZZZ, more subtle than the other page, less info. 
@@ -85,4 +82,8 @@ Wish list:
 use this to run:
 pio run -t upload
 
-
+to do: (post )
+- Review changes by claude, know every input
+- Review all features and functionality of sensors
+- Connect more inputs!
+- Work on todo list for phase 1-4. 
