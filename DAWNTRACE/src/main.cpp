@@ -9,8 +9,7 @@
 #include <Arduino.h>
 #include <DHT.h>
 #include <EEPROM.h>
-#include <Keypad.h>
-#include <LiquidCrystal_I2C.h>
+#include <LiquidCrystal.h>
 #include <RTClib.h>
 #include <Wire.h>
 #include <math.h>
@@ -79,24 +78,11 @@ enum DeviceState {
 // ============================================================================
 //  GLOBAL OBJECTS
 // ============================================================================
-RTC_DS1307 rtc;
-LiquidCrystal_I2C lcd(0x27, 16, 2); // Change to 0x3F if your adapter differs
+RTC_Millis rtc;
+LiquidCrystal lcd(8, 9, 10, 11, 12, 13); // RS=8, EN=9, D4=10, D5=11, D6=12, D7=13
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// Keypad setup: 4 rows × 4 columns
-const byte KEYPAD_ROWS = 4;
-const byte KEYPAD_COLS = 4;
 
-char keys[KEYPAD_ROWS][KEYPAD_COLS] = {{'1', '2', '3', 'A'},
-                                       {'4', '5', '6', 'B'},
-                                       {'7', '8', '9', 'C'},
-                                       {'*', '0', '#', 'D'}};
-
-byte rowPins[KEYPAD_ROWS] = {8, 9, 10, 11};   // D8–D11
-byte colPins[KEYPAD_COLS] = {12, 13, A1, A3}; // D12, D13, A1, A3
-
-Keypad keypad =
-    Keypad(makeKeymap(keys), rowPins, colPins, KEYPAD_ROWS, KEYPAD_COLS);
 
 // ============================================================================
 //  STATE VARIABLES
@@ -116,8 +102,10 @@ unsigned long lastDisplayUpdate = 0;
 const unsigned long DISPLAY_INTERVAL = 1000; // 1 second
 
 // --- Joystick button state ---
-bool buttonPressed = false;
+bool buttonLongPressed = false;
+bool buttonShortPressed = false;
 bool buttonWasPressed = false;
+bool buttonLongPressHandled = false;
 unsigned long buttonPressStart = 0;
 unsigned long lastDebounceTime = 0;
 bool lastButtonState = HIGH;
@@ -205,6 +193,70 @@ uint16_t calcSleepMinutes(uint8_t sh, uint8_t sm, uint8_t wh, uint8_t wm);
 
 void showReportScreen(uint8_t screen);
 
+void runHardwareDiagnostic();
+
+// ============================================================================
+//  HARDWARE DIAGNOSTIC
+// ============================================================================
+void runHardwareDiagnostic() {
+  lcd.clear();
+  lcd.print("Hardware Test...");
+  delay(1000);
+
+  // Test 1: Relay
+  lcd.clear();
+  lcd.print("Testing: Relay");
+  digitalWrite(RELAY_PIN, HIGH);
+  delay(500);
+  digitalWrite(RELAY_PIN, LOW);
+  delay(500);
+
+  // Test 2: Buzzer
+  lcd.clear();
+  lcd.print("Testing: Buzzer");
+  tone(BUZZER_PIN, 1000, 200); // Beep 1
+  delay(300);
+  tone(BUZZER_PIN, 1000, 200); // Beep 2
+  delay(500);
+
+  // Test 3: Sunrise LEDs
+  lcd.clear();
+  lcd.print("Testing: Sun LEDs");
+  for (int i = 0; i <= 255; i += 2) {
+    analogWrite(SUNRISE_LED_PIN, i);
+    delay(40);
+  }
+  analogWrite(SUNRISE_LED_PIN, 0);
+
+  // Test 4: Status LED
+  lcd.clear();
+  lcd.print("Testing: Red LED");
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  delay(500);
+  digitalWrite(STATUS_LED_PIN, LOW);
+
+  // Test 5: Sensors
+  lcd.clear();
+  lcd.print("Testing Sensors");
+  delay(1000);
+  
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  int ldrVal = analogRead(LDR_PIN);
+
+  lcd.clear();
+  if (isnan(t) || isnan(h)) {
+    lcd.print("DHT11: ERROR");
+  } else {
+    lcd.print("T:"); lcd.print(t, 1);
+    lcd.print(" H:"); lcd.print(h, 1);
+  }
+  lcd.setCursor(0, 1);
+  lcd.print("LDR Value: "); lcd.print(ldrVal);
+  
+  delay(4000); // Give user time to read sensor values
+}
+
 // ============================================================================
 //  SETUP
 // ============================================================================
@@ -229,32 +281,16 @@ void setup() {
   Wire.begin();
 
   // --- LCD init ---
-  lcd.init();
-  lcd.backlight();
+  lcd.begin(16, 2);
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("DAWNTRACE v1.0");
   lcd.setCursor(0, 1);
   lcd.print("Initializing...");
 
-  // --- RTC init ---
-  if (!rtc.begin()) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("RTC NOT FOUND!");
-    lcd.setCursor(0, 1);
-    lcd.print("Check wiring");
-    while (1) {
-      delay(1000);
-    } // halt — RTC is essential
-  }
-
-  // Only set time if RTC lost power / time invalid (year < 2020)
-  if (!rtc.isrunning()) {
-    // Set to compile time on first boot / after battery loss
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    Serial.println(F("RTC was NOT running — set to compile time"));
-  }
+  // --- RTC init (Software RTC_Millis) ---
+  rtc.begin(DateTime(F(__DATE__), F(__TIME__)));
+  Serial.println(F("Software RTC initialized to compile time"));
 
   // --- DHT11 init ---
   dht.begin();
@@ -268,6 +304,14 @@ void setup() {
   analogWrite(STATUS_LED_PIN, 80);
   delay(500);
   analogWrite(STATUS_LED_PIN, 0);
+
+  // Run the hardware diagnostic on boot
+  runHardwareDiagnostic();
+
+  // --- Re-initialize LCD ---
+  // (Relay clicks and buzzers on a breadboard can sometimes cause brief electrical noise 
+  // that corrupts the parallel data lines. Re-running begin() fixes any gibberish text).
+  lcd.begin(16, 2);
 
   // --- Clear splash screen, enter idle ---
   lcd.clear();
@@ -284,29 +328,24 @@ void loop() {
   // Always read joystick button (debounced)
   checkJoystickButton();
 
-  // Read keypad
-  char key = keypad.getKey();
+
 
   switch (currentState) {
   case STATE_IDLE:
     handleIdleState();
     // Check for sleep mode entry via joystick 3s hold
-    if (buttonPressed) {
+    if (buttonLongPressed) {
       DateTime now = rtc.now();
       enterSleepMode(now);
     }
-    // Keypad [D] also enters sleep mode
-    if (key == 'D') {
-      DateTime now = rtc.now();
-      enterSleepMode(now);
-    }
+
     break;
 
   case STATE_SLEEP_MODE:
     handleSleepState();
     // Joystick 3s hold exits sleep mode (simulating alarm dismiss for Phase
     // 2-4)
-    if (buttonPressed) {
+    if (buttonLongPressed) {
       DateTime now = rtc.now();
       exitSleepMode(now);
     }
@@ -314,21 +353,9 @@ void loop() {
 
   case STATE_POST_SLEEP_REPORT:
     handlePostSleepReport();
-    // Any key advances to next report screen
-    if (key != 0) {
-      reportScreen++;
-      if (reportScreen >= REPORT_SCREENS) {
-        // Save log entry and return to idle
-        saveSleepEntry();
-        lcd.clear();
-        currentState = STATE_IDLE;
-        lastDisplayUpdate = 0; // force immediate refresh
-      } else {
-        reportScreenDirty = true;
-      }
-    }
+
     // Joystick button also advances
-    if (buttonPressed) {
+    if (buttonShortPressed) {
       reportScreen++;
       if (reportScreen >= REPORT_SCREENS) {
         saveSleepEntry();
@@ -468,7 +495,8 @@ void saveSleepEntry() {
 //  JOYSTICK BUTTON — 3-SECOND HOLD DETECTION WITH DEBOUNCE
 // ============================================================================
 void checkJoystickButton() {
-  buttonPressed = false; // reset event flag each loop
+  buttonLongPressed = false; // reset event flag each loop
+  buttonShortPressed = false; // reset event flag each loop
 
   bool currentReading = digitalRead(JOYSTICK_BTN_PIN); // active-low
 
@@ -483,19 +511,20 @@ void checkJoystickButton() {
       if (!buttonWasPressed) {
         // Just pressed — start timing
         buttonWasPressed = true;
+        buttonLongPressHandled = false;
         buttonPressStart = millis();
+        buttonShortPressed = true; // Trigger short press once per click
       } else {
         // Being held — check if 3 seconds elapsed
-        if ((millis() - buttonPressStart) >= JOYSTICK_HOLD_MS) {
-          buttonPressed = true;     // trigger the event
-          buttonWasPressed = false; // reset so it doesn't re-trigger
-          buttonPressStart =
-              millis(); // prevent re-triggering on continued hold
+        if (!buttonLongPressHandled && (millis() - buttonPressStart) >= JOYSTICK_HOLD_MS) {
+          buttonLongPressed = true;     // trigger the long press event
+          buttonLongPressHandled = true; // prevent re-triggering until released
         }
       }
     } else {
       // Button released
       buttonWasPressed = false;
+      buttonLongPressHandled = false;
     }
   }
 
@@ -634,7 +663,7 @@ void enterSleepMode(DateTime now) {
   lastLDRSample = millis() - LDR_INTERVAL;
 
   // Dim display
-  lcd.noBacklight();
+
   lcd.clear();
 
   // Turn off sunrise LEDs and relay
@@ -662,7 +691,7 @@ void exitSleepMode(DateTime now) {
       calcSleepMinutes(sleepStartHour, sleepStartMinute, wakeHour, wakeMinute);
 
   // Restore display
-  lcd.backlight();
+
   lcd.clear();
 
   // Enter post-sleep report
