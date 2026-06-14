@@ -82,8 +82,7 @@ Wish list:
 use this to run:
 pio run -t upload
 
-to do: (post )
-- Review changes by claude, know every input
+to do: 
 - Review all features and functionality of sensors
-- Connect more inputs!
+- Fix IR remote inputs and infinite hardware check loop.
 - Work on todo list for phase 1-4. 

@@ -35,7 +35,7 @@
 #define IR_RECEIVE_PIN        7
 #define DECODE_NEC               // ELEGOO remote uses NEC protocol
 #define NO_LED_FEEDBACK_CODE     // saves flash — disable IR blink on pin 13
-#define IR_USE_AVR_TIMER1        // Fix Timer 2 conflict with tone()
+#define IR_NO_SEND               // Prevent Timer 2 from hijacking BUZZER_PIN (Pin 3)!
                                  // (pin 13 is our LCD D7 line, must not blink)
 
 #include <Arduino.h>
@@ -339,6 +339,7 @@ void drawMenuPage();
 void updateSunriseLED();
 void updateAlarmMelody();
 void stopAlarmSounds();
+void myTone(uint8_t pin, unsigned int frequency, unsigned long duration);
 
 uint16_t calcSleepMinutes(uint8_t sh, uint8_t sm, uint8_t wh, uint8_t wm);
 int16_t  calcSleepDebt();
@@ -363,7 +364,6 @@ void setup() {
   digitalWrite(RELAY_PIN,      LOW);
   analogWrite(SUNRISE_LED_PIN, 0);
   analogWrite(STATUS_LED_PIN,  0);
-  noTone(BUZZER_PIN);
 
   Serial.begin(9600);
   Wire.begin();
@@ -1081,7 +1081,6 @@ void updateAlarmMelody() {
     melody.noteIdx  = 0;
     melody.inGap    = false;
     melody.nextTime = millis();
-    noTone(BUZZER_PIN);
     Serial.print(F("Alarm Stage ")); Serial.println(newStage);
   }
 
@@ -1091,44 +1090,59 @@ void updateAlarmMelody() {
     if (melody.inGap) { melody.inGap = false; melody.noteIdx = 0; }
     uint16_t freq = stage1Notes[melody.noteIdx][0];
     uint16_t dur  = stage1Notes[melody.noteIdx][1];
-    tone(BUZZER_PIN, freq, dur);
+    myTone(BUZZER_PIN, freq, dur);
     melody.noteIdx++;
     if (melody.noteIdx >= STAGE1_NOTE_COUNT) {
       melody.inGap = true; melody.noteIdx = 0;
       melody.nextTime = millis() + STAGE1_GAP_MS;
     } else {
-      melody.nextTime = millis() + dur + 20;
+      melody.nextTime = millis() + 20;
     }
   }
   else if (melody.stage == 2) {
     if (melody.inGap) { melody.inGap = false; melody.noteIdx = 0; }
     uint16_t freq = stage2Notes[melody.noteIdx][0];
     uint16_t dur  = stage2Notes[melody.noteIdx][1];
-    tone(BUZZER_PIN, freq, dur);
+    myTone(BUZZER_PIN, freq, dur);
     melody.noteIdx++;
     if (melody.noteIdx >= STAGE2_NOTE_COUNT) {
       melody.inGap = true; melody.noteIdx = 0;
       melody.nextTime = millis() + STAGE2_GAP_MS;
     } else {
-      melody.nextTime = millis() + dur + 20;
+      melody.nextTime = millis() + 20;
     }
   }
   else {
     // Stage 3 — continuous rapid loop
     uint16_t freq = stage3Notes[melody.noteIdx][0];
-    uint16_t dur  = stage3Notes[melody.noteIdx][1];   // fixed typo from prev reply
-    tone(BUZZER_PIN, freq, dur);
+    uint16_t dur  = stage3Notes[melody.noteIdx][1];
+    myTone(BUZZER_PIN, freq, dur);
     melody.noteIdx  = (melody.noteIdx + 1) % STAGE3_NOTE_COUNT;
-    melody.nextTime = millis() + dur + 10;
+    melody.nextTime = millis() + 10;
   }
 }
 
 void stopAlarmSounds() {
-  noTone(BUZZER_PIN);
   melody.stage    = 0;
   melody.noteIdx  = 0;
   melody.inGap    = false;
   melody.nextTime = 0;
+}
+
+void myTone(uint8_t pin, unsigned int frequency, unsigned long duration) {
+  if (frequency == 0) {
+    delay(duration);
+    return;
+  }
+  unsigned long start = millis();
+  unsigned long halfPeriod = 1000000L / frequency / 2;
+  pinMode(pin, OUTPUT);
+  while (millis() - start < duration) {
+    digitalWrite(pin, HIGH);
+    delayMicroseconds(halfPeriod);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(halfPeriod);
+  }
 }
 
 // ============================================================================
@@ -1357,9 +1371,8 @@ void bootDiagnostic() {
   digitalWrite(RELAY_PIN, LOW);  delay(200);
 
   lcd.setCursor(0, 1); lcd.print(F("Buzzer...       "));
-  tone(BUZZER_PIN, NOTE_C5, 150); delay(200);
-  tone(BUZZER_PIN, NOTE_G5, 150); delay(200);
-  noTone(BUZZER_PIN);
+  myTone(BUZZER_PIN, NOTE_C5, 150); delay(50);
+  myTone(BUZZER_PIN, NOTE_G5, 150); delay(50);
 
   lcd.setCursor(0, 1); lcd.print(F("Sunrise LEDs... "));
   for (int i = 0; i <= 255; i += 3) { analogWrite(SUNRISE_LED_PIN, i); delay(6); }
