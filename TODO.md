@@ -84,7 +84,5 @@ pio run -t upload
 
 to do: 
 - Review all features and functionality of sensors
-- Fix IR remote inputs and infinite hardware check loop. (Important)
 - Work on todo list for phase 1-4. 
 
-sample commit

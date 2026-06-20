@@ -1,0 +1,1 @@
+{"events": [{"name": "cmd_run", "params": {"path_args": ["run"]}, "timestamp": 1781989511}, {"name": "platform_run", "params": {"platform": "atmelavr", "framework": ["arduino"], "board": "uno", "pid": "69f96b4f67a3f6bc7a27e5d9f77ca8f5a2bd00d9", "platform_name": "atmelavr", "platform_version": "5.2.0", "targets": ["upload"]}, "timestamp": 1781989511}]}

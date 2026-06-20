@@ -81,6 +81,7 @@
 #define IR_BTN_7      0xFF10EF
 #define IR_BTN_8      0xFF42BD
 #define IR_BTN_9      0xFF4AB5
+#define IR_BTN_POWER  0xFF0000 // Update this with your remote's On/Off code from Serial Monitor
 #define IR_REPEAT     0xFFFFFFFF  // NEC auto-repeat while held
 
 // Minimum gap between accepted repeat signals (ms)
@@ -150,7 +151,7 @@ enum MenuPage {
 //  GLOBAL OBJECTS
 // ============================================================================
 LiquidCrystal lcd(8, 9, 10, 11, 12, 13);   // parallel, identical to original
-RTC_DS1307    rtc;
+RTC_Millis    rtc;
 DHT           dht(DHT_PIN, DHT_TYPE);
 
 // ============================================================================
@@ -192,10 +193,12 @@ bool    evtDown     = false;
 bool    evtLeft     = false;
 bool    evtRight    = false;
 bool    evtOK       = false;
-bool    evtStar     = false;
-bool    evtHash     = false;
+bool    evtStop     = false;
+bool    evtEQ       = false;
+bool    evtRept     = false;
 bool    evtDigit    = false;
 uint8_t evtDigitVal = 0;
+bool    evtPower    = false;
 
 uint32_t lastIRCode    = 0;
 uint32_t lastIRTime    = 0;
@@ -379,13 +382,8 @@ void setup() {
   // which is shared with our LCD D7 data line.
   IrReceiver.begin(IR_RECEIVE_PIN, DISABLE_LED_FEEDBACK);
 
-  if (!rtc.begin()) {
-    Serial.println(F("Couldn't find RTC"));
-  }
-  if (!rtc.isrunning()) {
-    Serial.println(F("RTC is NOT running, setting time!"));
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
+  rtc.begin(DateTime(F(__DATE__), F(__TIME__)));
+  Serial.println(F("Software RTC initialized"));
   Serial.println(F("RTC init"));
 
   dht.begin();
@@ -398,7 +396,15 @@ void setup() {
   delay(400);
   analogWrite(STATUS_LED_PIN, 0);
 
-  bootDiagnostic();
+  // Use EEPROM to detect brownouts during hardware check
+  if (EEPROM.read(0x0009) == 0) {
+    EEPROM.update(0x0009, 1);
+    bootDiagnostic();
+    EEPROM.update(0x0009, 0);
+  } else {
+    EEPROM.update(0x0009, 0); // Reset flag for next proper boot
+    Serial.println(F("Skipped boot diagnostic (reset detected)."));
+  }
 
   lcd.clear();
   currentState      = STATE_IDLE;
@@ -415,11 +421,7 @@ void setup() {
 void loop() {
   readIR();           // populate evt* flags from IR receiver
 
-  // 1: Restarts the entire program (soft reset)
-  if (evtDigit && evtDigitVal == 1) {
-    void(* resetFunc) (void) = 0;
-    resetFunc();
-  }
+  // Soft reset (1) removed as per input mappings
 
   DateTime now = rtc.now();
 
@@ -438,12 +440,12 @@ void loop() {
     // ── IDLE ──────────────────────────────────────────────────────────────
     case STATE_IDLE:
       handleIdleState();
-      // 2: Toggle to enter sleep mode
-      if (evtDigit && evtDigitVal == 2) {
+      // Power (Red): Toggle to enter sleep mode
+      if (evtPower) {
         enterSleepMode(now);
       }
-      // 4: Enter Alarm setting screen
-      if (evtDigit && evtDigitVal == 4) {
+      // >|| (OK): Enter Alarm setting screen
+      if (evtOK) {
         menuAlarmHour    = alarmHour;
         menuAlarmMin     = alarmMinute;
         menuSunriseDur   = sunriseDuration;
@@ -461,8 +463,8 @@ void loop() {
     // ── SLEEP ─────────────────────────────────────────────────────────────
     case STATE_SLEEP_MODE:
       handleSleepState();
-      // 2: Toggle to leave sleep mode
-      if (evtDigit && evtDigitVal == 2) {
+      // Power (Red): Toggle to leave sleep mode
+      if (evtPower) {
         exitSleepMode(now);
       }
       break;
@@ -470,8 +472,8 @@ void loop() {
     // ── SNOOZE ────────────────────────────────────────────────────────────
     case STATE_SNOOZE:
       handleSnoozeState();
-      if (evtOK) {
-        // OK during snooze → wake up early
+      if (evtOK || evtPower) {
+        // OK or Power during snooze → wake up early / dismiss
         snoozeActive = false;
         startAlarm();
       }
@@ -485,17 +487,16 @@ void loop() {
     // ── ALARM ACTIVE ──────────────────────────────────────────────────────
     case STATE_ALARM_ACTIVE:
       handleAlarmActive();
-      if (evtOK) {
-        dismissAlarm(now);
-      }
+      // '5' Snooze for 5 minutes
       if (evtDigit && evtDigitVal == 5) {
-        triggerSnooze(SNOOZE_5_MIN, now);
+        triggerSnooze(5, now);
       }
+      // '0' Snooze for 10 minutes
       if (evtDigit && evtDigitVal == 0) {
-        triggerSnooze(SNOOZE_10_MIN, now);
+        triggerSnooze(10, now);
       }
-      // Any other directional button also dismisses (bedside grab in the dark)
-      if (evtUp || evtDown || evtLeft || evtRight || evtStar || evtHash) {
+      // On/Off (Power) dismisses alarm
+      if (evtPower || evtStop) {
         dismissAlarm(now);
       }
       break;
@@ -503,9 +504,11 @@ void loop() {
     // ── POST-SLEEP REPORT ─────────────────────────────────────────────────
     case STATE_POST_SLEEP_REPORT:
       handlePostSleepReport();
-      // 3: Press to toggle through pages after sleep mode is exited
-      if (evtDigit && evtDigitVal == 3) {
-        reportScreen++;
+      // >>| or |<< to navigate pages
+      if (evtRight || evtLeft || evtOK) {
+        if (evtLeft && reportScreen > 0) reportScreen--;
+        else reportScreen++;
+        
         reportScreenDirty = true;
         if (reportScreen >= REPORT_SCREENS) {
           saveSleepEntry();
@@ -516,6 +519,13 @@ void loop() {
           currentState      = STATE_IDLE;
           lastDisplayUpdate = 0;
         }
+      }
+      // STOP to exit report immediately
+      if (evtStop) {
+        saveSleepEntry();
+        lcd.clear();
+        currentState = STATE_IDLE;
+        lastDisplayUpdate = 0;
       }
       break;
 
@@ -532,30 +542,30 @@ void loop() {
 void readIR() {
   // Clear all event flags at the start of every loop iteration
   evtUp = evtDown = evtLeft = evtRight = false;
-  evtOK = evtStar = evtHash = evtDigit  = false;
+  evtOK = evtPower = evtStop = evtEQ = evtRept = evtDigit = false;
   evtDigitVal = 0;
 
   if (!IrReceiver.decode()) return;
 
   // IRremote v4: raw data is in decodedIRData.decodedRawData
   uint32_t raw = IrReceiver.decodedIRData.decodedRawData;
+  // Also extract the 8-bit command before resuming, as resume() can clear the struct!
+  uint16_t cmd = IrReceiver.decodedIRData.command;
 
-  // Resume receiver immediately so we don't miss the next signal
-  IrReceiver.resume();
-
-  // Handle NEC repeat codes
-  if (raw == IR_REPEAT || IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT) {
-    // Only propagate repeats for value-change buttons, and rate-limit them
-    if ((millis() - lastIRTime) < IR_REPEAT_GAP_MS) return;
+  // Handle NEC repeat codes and aggressive duplicate codes from 21-key remotes
+  if (raw == IR_REPEAT || IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT || raw == lastIRCode) {
+    // If the same button is pressed repeatedly (or held down)
+    // Only propagate repeats if enough time has passed (rate-limiting)
+    if ((millis() - lastIRTime) < IR_REPEAT_GAP_MS) {
+      // Too fast, ignore this bounce
+      IrReceiver.resume();
+      return; 
+    }
     raw = lastIRCode;   // replay the last real button
   } else {
     lastIRCode = raw;
   }
   lastIRTime = millis();
-
-  // In IRremote v4, the raw data formatting changed. If raw doesn't match the old 32-bit codes,
-  // we can also fall back to the 8-bit command values parsed natively by the library.
-  uint16_t cmd = IrReceiver.decodedIRData.command;
 
   // Print for calibration — every unique press shows up on Serial Monitor
   Serial.print(F("Protocol: ")); Serial.print(IrReceiver.decodedIRData.protocol);
@@ -570,8 +580,7 @@ void readIR() {
     case IR_BTN_LEFT:  evtLeft  = true;              break;
     case IR_BTN_RIGHT: evtRight = true;              break;
     case IR_BTN_OK:    evtOK    = true;              break;
-    case IR_BTN_STAR:  evtStar  = true;              break;
-    case IR_BTN_HASH:  evtHash  = true;              break;
+    case IR_BTN_POWER: evtPower = true;              break;
     
     // Map number buttons
     case IR_BTN_0: evtDigit = true; evtDigitVal = 0; break;
@@ -589,30 +598,42 @@ void readIR() {
 
   // IRremote v4 parses raw data differently (MSB vs LSB). If the 32-bit code didn't match,
   // fall back to the 8-bit command byte which is independent of MSB/LSB formatting!
-  if (!evtUp && !evtDown && !evtLeft && !evtRight && !evtOK && !evtStar && !evtHash && !evtDigit) {
+  if (!evtUp && !evtDown && !evtLeft && !evtRight && !evtOK && !evtPower && !evtStop && !evtEQ && !evtRept && !evtDigit) {
     switch (cmd) {
-      case 0x62: evtUp    = true;              break;
-      case 0x22: evtDown  = true;              break;
-      case 0x02: evtLeft  = true;              break;
-      case 0xC2: evtRight = true;              break;
-      case 0x38: evtOK    = true;              break;
-      case 0xA2: evtStar  = true;              break;
-      case 0xE2: evtHash  = true;              break;
+      // Directions & OK (Using the central cross layout)
+      case 0x46: evtUp    = true; break; // VOL+ (Up)
+      case 0x15: evtDown  = true; break; // VOL- (Down)
+      case 0x44: evtLeft  = true; break; // |<< (Prev)
+      case 0x43: evtRight = true; break; // >>| (Next)
+      case 0x40: evtOK    = true; break; // >|| (Enter/OK)
+
+      // Special Buttons
+      case 0x45: evtPower = true; break; // Power (Red)
+      case 0x47: evtStop  = true; break; // FUNC/STOP
+      case 0x19: evtEQ    = true; break; // EQ
+      case 0x0D: evtRept  = true; break; // ST/REPT
+      
+      // The physical Up/Down triangle buttons
+      case 0x09: evtUp    = true; break; // Up Triangle
+      case 0x07: evtDown  = true; break; // Down Triangle
       
       // Numbers
-      case 0x52: evtDigit = true; evtDigitVal = 0; break;
-      case 0x68: evtDigit = true; evtDigitVal = 1; break;
-      case 0x98: evtDigit = true; evtDigitVal = 2; break;
-      case 0xB0: evtDigit = true; evtDigitVal = 3; break;
-      case 0x30: evtDigit = true; evtDigitVal = 4; break;
-      case 0x18: evtDigit = true; evtDigitVal = 5; break;
-      case 0x7A: evtDigit = true; evtDigitVal = 6; break;
-      case 0x10: evtDigit = true; evtDigitVal = 7; break;
-      case 0x42: evtDigit = true; evtDigitVal = 8; break;
+      case 0x16: evtDigit = true; evtDigitVal = 0; break;
+      case 0x0C: evtDigit = true; evtDigitVal = 1; break;
+      case 0x18: evtDigit = true; evtDigitVal = 2; break;
+      case 0x5E: evtDigit = true; evtDigitVal = 3; break;
+      case 0x08: evtDigit = true; evtDigitVal = 4; break;
+      case 0x1C: evtDigit = true; evtDigitVal = 5; break;
+      case 0x5A: evtDigit = true; evtDigitVal = 6; break;
+      case 0x42: evtDigit = true; evtDigitVal = 7; break;
+      case 0x52: evtDigit = true; evtDigitVal = 8; break;
       case 0x4A: evtDigit = true; evtDigitVal = 9; break;
       default: break;
     }
   }
+
+  // Resume receiver AFTER all data has been safely extracted and used
+  IrReceiver.resume();
 }
 
 // ============================================================================
@@ -789,15 +810,19 @@ void handleAlarmActive() {
   if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL) {
     lastDisplayUpdate = millis();
     DateTime now = rtc.now();
+    
+    uint8_t h = now.hour();
+    bool isPM = (h >= 12);
+    if (h > 12) h -= 12;
+    if (h == 0) h = 12;
+
     char line1[17];
-    snprintf(line1, sizeof(line1), "  %02d:%02d  ALARM!", now.hour(), now.minute());
+    snprintf(line1, sizeof(line1), " %02d:%02d%s  ALARM!", h, now.minute(), isPM ? "PM" : "AM");
     lcd.setCursor(0, 0); lcd.print(line1);
+    
     lcd.setCursor(0, 1);
-    // Cycle hint messages every 1.5 s
-    uint8_t hint = (millis() / 1500) % 3;
-    if      (hint == 0) lcd.print(F("OK = dismiss    "));
-    else if (hint == 1) lcd.print(F("5  = snooze 5m  "));
-    else                lcd.print(F("0  = snooze 10m "));
+    // Use short condensed hints
+    lcd.print(F("0=10m 5=5m PWR=X"));
   }
 }
 
@@ -811,27 +836,26 @@ void handlePostSleepReport() {
 // ============================================================================
 //  SETTINGS MENU
 // ============================================================================
-// Button layout:
-//   ◄ / ►  fine adjust  (±1 step, or ±5 min for minute field)
-//   ▲ / ▼  coarse adjust (larger jumps — see per-field comment)
-//   0–9    direct two-digit entry on hour/minute pages
-//   OK     advance to next page
-//   #      save & exit immediately from any page
-//   *      discard & exit immediately from any page
+// Button layout (21-key remote):
+//   VOL+ / VOL-  increase / decrease value
+//   |<< / >>|    previous / next setting page
+//   0–9          direct two-digit entry on hour/minute pages
+//   EQ           save & exit immediately from any page
+//   FUNC/STOP    discard & exit immediately from any page
 
 void handleSettingsMenu() {
   bool redraw = false;
 
-  // ── 9 and 7 to Increase/Decrease ─────────────────────────────────────────
-  if (evtDigit && (evtDigitVal == 9 || evtDigitVal == 7)) {
-    int dir = (evtDigitVal == 9) ? 1 : -1;
+  // ── VOL+ / VOL- to Increase/Decrease ─────────────────────────────────────
+  if (evtUp || evtDown) {
+    int dir = evtUp ? 1 : -1;
     switch (currentMenuPage) {
       case MENU_ALARM_HOUR:
         menuAlarmHour   = (uint8_t)((menuAlarmHour + dir + 24) % 24); break;
       case MENU_ALARM_MIN:
-        menuAlarmMin    = (uint8_t)((menuAlarmMin + dir + 60) % 60); break;
+        menuAlarmMin    = (uint8_t)((menuAlarmMin + dir * 5 + 60) % 60); break;
       case MENU_SUNRISE_DUR:
-        menuSunriseDur  = (uint8_t)constrain((int)menuSunriseDur  + dir, 5, 60); break;
+        menuSunriseDur  = (uint8_t)constrain((int)menuSunriseDur  + dir * 5, 5, 60); break;
       case MENU_TARGET_SLEEP:
         menuTargetSleep = (uint8_t)constrain((int)menuTargetSleep + dir, 4, 12); break;
       case MENU_ALARM_TOGGLE:
@@ -843,34 +867,54 @@ void handleSettingsMenu() {
     redraw = true;
   }
 
-  // ── 4 to confirm and move to next screen ──────────────────────────────────
-  if (evtDigit && evtDigitVal == 4) {
-    if ((uint8_t)currentMenuPage + 1 >= (uint8_t)MENU_PAGE_COUNT) {
-      // Last page -> treat as save & exit
-      alarmHour        = menuAlarmHour;
-      alarmMinute      = menuAlarmMin;
-      sunriseDuration  = menuSunriseDur;
-      targetSleepHours = menuTargetSleep;
-      alarmEnabled     = menuAlarmEnabled;
-      ldrThreshold     = menuLdrThresh;
-      saveSettings();
-      lastAlarmFiredDay = 255;   // let new alarm time take effect tonight
-
-      lcd.clear();
-      lcd.setCursor(0, 0); lcd.print(F("Settings saved! "));
-      lcd.setCursor(0, 1);
-      lcd.print(alarmEnabled ? F("Alarm ON  ") : F("Alarm OFF "));
-      lcd.print(alarmHour   < 10 ? "0" : ""); lcd.print(alarmHour);
-      lcd.print(F(":")); lcd.print(alarmMinute < 10 ? "0" : ""); lcd.print(alarmMinute);
-      delay(1500);
-      lcd.clear();
-      currentState      = STATE_IDLE;
-      lastDisplayUpdate = 0;
-      return;
+  // ── |<< / >>| to change screen ────────────────────────────────────────────
+  if (evtRight || evtLeft) {
+    if (evtRight) {
+      if ((uint8_t)currentMenuPage + 1 >= (uint8_t)MENU_PAGE_COUNT) {
+        currentMenuPage = (MenuPage)0; // wrap around
+      } else {
+        currentMenuPage = (MenuPage)((uint8_t)currentMenuPage + 1);
+      }
     } else {
-      currentMenuPage = (MenuPage)((uint8_t)currentMenuPage + 1);
-      redraw = true;
+      if ((uint8_t)currentMenuPage == 0) {
+        currentMenuPage = (MenuPage)((uint8_t)MENU_PAGE_COUNT - 1); // wrap around
+      } else {
+        currentMenuPage = (MenuPage)((uint8_t)currentMenuPage - 1);
+      }
     }
+    redraw = true;
+  }
+
+  // ── EQ to save and exit immediately ───────────────────────────────────────
+  if (evtEQ) {
+    alarmHour        = menuAlarmHour;
+    alarmMinute      = menuAlarmMin;
+    sunriseDuration  = menuSunriseDur;
+    targetSleepHours = menuTargetSleep;
+    alarmEnabled     = menuAlarmEnabled;
+    ldrThreshold     = menuLdrThresh;
+    saveSettings();
+    lastAlarmFiredDay = 255;   // let new alarm time take effect tonight
+
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print(F("Settings saved! "));
+    delay(1000);
+    lcd.clear();
+    currentState      = STATE_IDLE;
+    lastDisplayUpdate = 0;
+    return;
+  }
+
+  // ── FUNC/STOP to discard and exit immediately ────────────────────────────
+  if (evtStop) {
+    loadSettings(); // Restores RAM variables from EEPROM
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print(F("Changes discard."));
+    delay(1000);
+    lcd.clear();
+    currentState      = STATE_IDLE;
+    lastDisplayUpdate = 0;
+    return;
   }
 
   if (redraw) drawMenuPage();
@@ -881,57 +925,57 @@ void drawMenuPage() {
   switch (currentMenuPage) {
 
     case MENU_ALARM_HOUR:
-      lcd.setCursor(0, 0); lcd.print(F("Alarm Hr [0-9x2]"));
+      lcd.setCursor(0, 0); lcd.print(F("Alarm Hr   [1/6]"));
       lcd.setCursor(0, 1);
-      lcd.print(F("<"));
+      lcd.print(F("["));
       lcd.print(menuAlarmHour < 10 ? "0" : ""); lcd.print(menuAlarmHour);
       lcd.print(F(":"));
       lcd.print(menuAlarmMin  < 10 ? "0" : ""); lcd.print(menuAlarmMin);
-      lcd.print(F("> OK=next #=save"));
+      lcd.print(F("]  EQ:Save"));
       break;
 
     case MENU_ALARM_MIN:
-      lcd.setCursor(0, 0); lcd.print(F("Alarm Min[0-9x2]"));
+      lcd.setCursor(0, 0); lcd.print(F("Alarm Min  [2/6]"));
       lcd.setCursor(0, 1);
-      lcd.print(F("<"));
+      lcd.print(F("["));
       lcd.print(menuAlarmHour < 10 ? "0" : ""); lcd.print(menuAlarmHour);
       lcd.print(F(":"));
       lcd.print(menuAlarmMin  < 10 ? "0" : ""); lcd.print(menuAlarmMin);
-      lcd.print(F("> LR=5 UD=15   "));
+      lcd.print(F("]  EQ:Save"));
       break;
 
     case MENU_SUNRISE_DUR:
-      lcd.setCursor(0, 0); lcd.print(F("Sunrise (min)   "));
+      lcd.setCursor(0, 0); lcd.print(F("SunriseDur [3/6]"));
       lcd.setCursor(0, 1);
-      lcd.print(F("<")); lcd.print(menuSunriseDur);
-      lcd.print(F("min> LR=5 UD=10 "));
+      lcd.print(F("[")); lcd.print(menuSunriseDur);
+      lcd.print(F(" m]  EQ:Save"));
       break;
 
     case MENU_TARGET_SLEEP:
-      lcd.setCursor(0, 0); lcd.print(F("Target Sleep    "));
+      lcd.setCursor(0, 0); lcd.print(F("Targ Sleep [4/6]"));
       lcd.setCursor(0, 1);
-      lcd.print(F("<")); lcd.print(menuTargetSleep);
-      lcd.print(F("hr>  LR=1 UD=2  "));
+      lcd.print(F("[")); lcd.print(menuTargetSleep);
+      lcd.print(F(" hr] EQ:Save"));
       break;
 
     case MENU_ALARM_TOGGLE:
-      lcd.setCursor(0, 0); lcd.print(F("Alarm ON/OFF    "));
+      lcd.setCursor(0, 0); lcd.print(F("AlarmEnabld[5/6]"));
       lcd.setCursor(0, 1);
-      lcd.print(F("<"));
+      lcd.print(F("["));
       lcd.print(menuAlarmEnabled ? F("ON ") : F("OFF"));
-      lcd.print(F("> any dir=toggle"));
+      lcd.print(F("]   EQ:Save"));
       break;
 
     case MENU_LDR_THRESH:
-      lcd.setCursor(0, 0); lcd.print(F("Light Threshold "));
+      lcd.setCursor(0, 0); lcd.print(F("LightThresh[6/6]"));
       lcd.setCursor(0, 1);
-      lcd.print(F("<")); lcd.print(menuLdrThresh);
-      lcd.print(F("> LR=50 UD=100  "));
+      lcd.print(F("[")); lcd.print(menuLdrThresh);
+      lcd.print(F("]    EQ:Save"));
       break;
 
     case MENU_SAVE_EXIT:
-      lcd.setCursor(0, 0); lcd.print(F("  # = SAVE      "));
-      lcd.setCursor(0, 1); lcd.print(F("  * = DISCARD   "));
+      lcd.setCursor(0, 0); lcd.print(F("  EQ: Save All  "));
+      lcd.setCursor(0, 1); lcd.print(F("STOP: DiscardAll"));
       break;
 
     default: break;
@@ -1225,15 +1269,37 @@ void sampleLDR() {
 // ============================================================================
 void updateClockDisplay(DateTime now) {
   char line1[17], line2[17];
-  snprintf(line1, sizeof(line1), "%02d:%02d:%02d %s",
-           now.hour(), now.minute(), now.second(), dayNames[now.dayOfTheWeek()]);
-  if (alarmEnabled) {
-    snprintf(line2, sizeof(line2), "%02d/%02d/%02d A%02d:%02d",
-             now.day(), now.month(), now.year() % 100, alarmHour, alarmMinute);
+  
+  uint8_t h = now.hour();
+  bool isPM = (h >= 12);
+  uint8_t h12 = h % 12;
+  if (h12 == 0) h12 = 12;
+
+  // Left-align time, right-align day
+  if (h12 >= 10) {
+    snprintf(line1, sizeof(line1), "%d:%02d %s     %s",
+             h12, now.minute(), isPM ? "PM" : "AM", dayNames[now.dayOfTheWeek()]);
   } else {
-    snprintf(line2, sizeof(line2), "%02d/%02d/%02d A:OFF",
-             now.day(), now.month(), now.year() % 100);
+    snprintf(line1, sizeof(line1), "%d:%02d %s      %s",
+             h12, now.minute(), isPM ? "PM" : "AM", dayNames[now.dayOfTheWeek()]);
   }
+
+  // Left-align date, right-align alarm
+  if (alarmEnabled) {
+    uint8_t ah = alarmHour % 12;
+    if (ah == 0) ah = 12;
+    if (ah >= 10) {
+      snprintf(line2, sizeof(line2), "%02d/%02d    (%d:%02d)",
+               now.month(), now.day(), ah, alarmMinute);
+    } else {
+      snprintf(line2, sizeof(line2), "%02d/%02d     (%d:%02d)",
+               now.month(), now.day(), ah, alarmMinute);
+    }
+  } else {
+    snprintf(line2, sizeof(line2), "%02d/%02d    ALM:OFF",
+             now.month(), now.day());
+  }
+
   lcd.setCursor(0, 0); lcd.print(line1);
   lcd.setCursor(0, 1); lcd.print(line2);
 }
@@ -1259,43 +1325,42 @@ void showReportScreen(uint8_t screen) {
       uint16_t h = sleepDurationMin / 60;
       uint16_t m = sleepDurationMin % 60;
       if (sleepWasLogged) {
-        snprintf(line1, sizeof(line1), "Slept: %dh %02dmin", h, m);
-        snprintf(line2, sizeof(line2), "Wake: %02d:%02d >   ", wakeHour, wakeMinute);
+        snprintf(line1, sizeof(line1), "Slept:%dh%02dm[1/5]", h, m);
       } else {
-        strcpy(line1,  "Slept: no log   ");
-        snprintf(line2, sizeof(line2), "Wake: %02d:%02d >   ", wakeHour, wakeMinute);
+        snprintf(line1, sizeof(line1), "Slept: n/a  [1/5]");
       }
+      snprintf(line2, sizeof(line2), "Wake: %02d:%02d ST:X", wakeHour, wakeMinute);
       break;
     }
     case 1:
       if (sampleCount > 0) {
-        snprintf(line1, sizeof(line1), "Avg Temp: %dC    ", avgTemp);
-        snprintf(line2, sizeof(line2), "Avg Hum:  %d%%    ", avgHum);
+        snprintf(line1, sizeof(line1), "AvgTemp: %dC[2/5]", avgTemp);
+        snprintf(line2, sizeof(line2), "AvgHum: %d%% ST:X", avgHum);
       } else {
-        strcpy(line1, "Avg Temp: --C   ");
-        strcpy(line2, "Avg Hum:  --%   ");
+        strcpy(line1, "AvgTemp: --[2/5]");
+        strcpy(line2, "AvgHum: -- ST:X ");
       }
       break;
     case 2:
-      snprintf(line1, sizeof(line1), "Light Events: %d ", lightEventCount);
-      if      (lightEventCount == 0) strcpy(line2, "Night: Dark     ");
-      else if (lightEventCount <= 3) strcpy(line2, "Night: Some     ");
+      snprintf(line1, sizeof(line1), "Lgt Events:%d[3/5]", lightEventCount);
+      if      (lightEventCount == 0) strcpy(line2, "Night: Dark ST:X");
+      else if (lightEventCount <= 3) strcpy(line2, "Night: Some ST:X");
       else                           strcpy(line2, "Night: Bright!  ");
       break;
     case 3: {
       int16_t  debt = calcSleepDebt();
       uint16_t dh   = debt / 60;
       uint16_t dm   = debt % 60;
-      if (debt == 0) strcpy(line1, "Debt: NONE      ");
-      else           snprintf(line1, sizeof(line1), "Debt: %dh %02dmin", dh, dm);
+      if (debt == 0) strcpy(line1, "Debt: NONE [4/5]");
+      else           snprintf(line1, sizeof(line1), "Debt:%dh%02dm [4/5]", dh, dm);
       char pat[12];
       calcConsistency(pat);
-      snprintf(line2, sizeof(line2), "Pattern: %-7s", pat);
+      snprintf(line2, sizeof(line2), "Ptrn: %-5s ST:X", pat);
       break;
     }
     case 4:
-      strcpy(line1, "  Log saved!    ");
-      strcpy(line2, "  OK or > done  ");
+      strcpy(line1, "Log saved! [5/5]");
+      strcpy(line2, ">|| to finish   ");
       break;
     default:
       strcpy(line1, "                ");
