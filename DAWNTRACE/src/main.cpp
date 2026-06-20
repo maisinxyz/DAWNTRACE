@@ -202,6 +202,7 @@ bool    evtPower    = false;
 
 uint32_t lastIRCode    = 0;
 uint32_t lastIRTime    = 0;
+uint32_t lastSerialUpdate = 0;
 
 // ============================================================================
 //  SLEEP TRACKING
@@ -338,6 +339,7 @@ void updateClockDisplay(DateTime now);
 void updateSleepDisplay(DateTime now);
 void showReportScreen(uint8_t screen);
 void drawMenuPage();
+void sendSerialJSON(DateTime now);
 
 void updateSunriseLED();
 void updateAlarmMelody();
@@ -534,6 +536,14 @@ void loop() {
       handleSettingsMenu();
       break;
   }
+
+  // Draw Serial Dashboard every 1s or immediately if an input occurred
+  if (millis() - lastSerialUpdate >= 1000 || 
+      evtUp || evtDown || evtLeft || evtRight || evtOK || 
+      evtPower || evtStop || evtEQ || evtRept || evtDigit) {
+    lastSerialUpdate = millis();
+    sendSerialJSON(now);
+  }
 }
 
 // ============================================================================
@@ -568,9 +578,10 @@ void readIR() {
   lastIRTime = millis();
 
   // Print for calibration — every unique press shows up on Serial Monitor
-  Serial.print(F("Protocol: ")); Serial.print(IrReceiver.decodedIRData.protocol);
-  Serial.print(F(" | IR raw: 0x")); Serial.print(raw, HEX);
-  Serial.print(F(" | cmd: 0x")); Serial.println(cmd, HEX);
+  // (Suppressed to keep the Live Dashboard clean)
+  // Serial.print(F("Protocol: ")); Serial.print(IrReceiver.decodedIRData.protocol);
+  // Serial.print(F(" | IR raw: 0x")); Serial.print(raw, HEX);
+  // Serial.print(F(" | cmd: 0x")); Serial.println(cmd, HEX);
 
   // We check against raw first, and if that fails, we can check known 8-bit commands
   // for standard remotes. For now, we rely on the raw codes since that's what's defined.
@@ -1265,7 +1276,50 @@ void sampleLDR() {
 }
 
 // ============================================================================
-//  DISPLAY FUNCTIONS  (identical to original)
+//  SERIAL DASHBOARD UI
+// ============================================================================
+void sendSerialJSON(DateTime now) {
+  // Read sensors
+  float t = dht.readTemperature();
+  float h_hum = dht.readHumidity();
+  int l = analogRead(LDR_PIN);
+
+  // Send JSON string directly using F() to save RAM
+  Serial.print(F("{\"time\":\""));
+  if (now.hour() < 10) Serial.print('0');
+  Serial.print(now.hour());
+  Serial.print(':');
+  if (now.minute() < 10) Serial.print('0');
+  Serial.print(now.minute());
+  
+  Serial.print(F("\",\"date\":\""));
+  Serial.print(now.year());
+  Serial.print('/');
+  if (now.month() < 10) Serial.print('0');
+  Serial.print(now.month());
+  Serial.print('/');
+  if (now.day() < 10) Serial.print('0');
+  Serial.print(now.day());
+
+  Serial.print(F("\",\"alarmEn\":"));  Serial.print(alarmEnabled ? 1 : 0);
+  Serial.print(F(",\"alarmH\":"));    Serial.print(alarmHour);
+  Serial.print(F(",\"alarmM\":"));    Serial.print(alarmMinute);
+  Serial.print(F(",\"sunrise\":"));   Serial.print(sunriseDuration);
+  Serial.print(F(",\"targetH\":"));   Serial.print(targetSleepHours);
+  
+  Serial.print(F(",\"temp\":"));      Serial.print((int)t);
+  Serial.print(F(",\"hum\":"));       Serial.print((int)h_hum);
+  Serial.print(F(",\"light\":"));     Serial.print(l);
+  Serial.print(F(",\"lThresh\":"));   Serial.print(ldrThreshold);
+
+  Serial.print(F(",\"state\":"));     Serial.print(currentState);
+  Serial.print(F(",\"menu\":"));      Serial.print(currentMenuPage);
+  Serial.print(F(",\"report\":"));    Serial.print(reportScreen);
+  Serial.println(F("}"));
+}
+
+// ============================================================================
+//  DISPLAY UPDATES
 // ============================================================================
 void updateClockDisplay(DateTime now) {
   char line1[17], line2[17];

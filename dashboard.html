@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DAWNTRACE Live Hub</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Outfit:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --glass-bg: rgba(30, 41, 59, 0.7);
+      --glass-border: rgba(255, 255, 255, 0.1);
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.4);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-color);
+      background-image: radial-gradient(circle at top right, #1e1b4b, transparent 40%),
+                        radial-gradient(circle at bottom left, #082f49, transparent 40%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      overflow-x: hidden;
+    }
+
+    /* HEADER */
+    header {
+      width: 100%;
+      padding: 2rem 0;
+      text-align: center;
+      position: relative;
+    }
+    h1 {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 800;
+      font-size: 2.5rem;
+      margin: 0;
+      letter-spacing: 2px;
+      background: linear-gradient(90deg, #f8fafc, var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    /* CONNECT BUTTON */
+    #connect-btn {
+      margin-top: 1rem;
+      padding: 0.8rem 2rem;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--bg-color);
+      background: var(--accent);
+      border: none;
+      border-radius: 50px;
+      cursor: pointer;
+      box-shadow: 0 0 20px var(--accent-glow);
+      transition: all 0.3s ease;
+      font-family: 'Inter', sans-serif;
+    }
+    #connect-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 30px var(--accent-glow);
+    }
+    #connect-btn:active {
+      transform: translateY(0);
+    }
+
+    /* DASHBOARD GRID */
+    .dashboard {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 2rem;
+      width: 90%;
+      max-width: 1200px;
+      margin-top: 2rem;
+      opacity: 0.5;
+      pointer-events: none;
+      transition: opacity 0.5s ease;
+    }
+    .dashboard.active {
+      opacity: 1;
+      pointer-events: all;
+    }
+
+    /* GLASS CARDS */
+    .card {
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border);
+      border-radius: 24px;
+      padding: 2rem;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.3s ease;
+    }
+    .card:hover {
+      transform: translateY(-5px);
+    }
+
+    /* CENTER CLOCK */
+    .clock-card {
+      grid-column: 2 / 3;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .clock-card::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(circle, var(--accent-glow) 0%, transparent 60%);
+      opacity: 0.5;
+      z-index: 0;
+    }
+    .time {
+      font-family: 'Outfit', sans-serif;
+      font-size: 5rem;
+      font-weight: 700;
+      line-height: 1;
+      z-index: 1;
+      text-shadow: 0 0 20px var(--accent-glow);
+    }
+    .date {
+      font-size: 1.2rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+      z-index: 1;
+    }
+
+    /* SENSORS */
+    .sensor-card h3 {
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-top: 0;
+    }
+    .sensor-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--glass-border);
+    }
+    .sensor-item:last-child {
+      border-bottom: none;
+    }
+    .sensor-label {
+      font-size: 1.1rem;
+    }
+    .sensor-val {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    /* STATUS */
+    .status-card {
+      grid-column: 3 / 4;
+    }
+    .status-card h3 {
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-top: 0;
+    }
+    .state-badge {
+      display: inline-block;
+      padding: 0.5rem 1rem;
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent);
+      border-radius: 50px;
+      font-weight: 600;
+      margin-top: 1rem;
+      font-size: 1.2rem;
+    }
+    .hint-text {
+      margin-top: 1.5rem;
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+    
+    /* RESPONSIVE */
+    @media (max-width: 900px) {
+      .dashboard {
+        grid-template-columns: 1fr;
+      }
+      .clock-card {
+        grid-column: 1;
+      }
+      .status-card {
+        grid-column: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>DAWNTRACE</h1>
+    <button id="connect-btn">Connect via USB</button>
+  </header>
+
+  <div class="dashboard" id="dashboard">
+    
+    <!-- LEFT: Sensors -->
+    <div class="card sensor-card">
+      <h3>Room Environment</h3>
+      
+      <div class="sensor-item">
+        <span class="sensor-label">Temperature</span>
+        <span class="sensor-val" id="val-temp">--°C</span>
+      </div>
+      <div class="sensor-item">
+        <span class="sensor-label">Humidity</span>
+        <span class="sensor-val" id="val-hum">--%</span>
+      </div>
+      <div class="sensor-item">
+        <span class="sensor-label">Light Level</span>
+        <span class="sensor-val" id="val-light">--</span>
+      </div>
+    </div>
+
+    <!-- CENTER: Clock -->
+    <div class="card clock-card">
+      <div class="time" id="val-time">00:00</div>
+      <div class="date" id="val-date">YYYY/MM/DD</div>
+      <div style="margin-top: 1.5rem; z-index: 1;">
+        <span style="color: var(--text-muted);">Next Alarm: </span>
+        <span id="val-alarm" style="font-weight: 600; color: #f8fafc;">OFF</span>
+      </div>
+    </div>
+
+    <!-- RIGHT: Status -->
+    <div class="card status-card">
+      <h3>System Status</h3>
+      <div class="state-badge" id="val-state">Disconnected</div>
+      <div class="hint-text" id="val-hints">
+        Click the connect button above to pair with your DAWNTRACE clock.
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const connectBtn = document.getElementById('connect-btn');
+    const dashboard = document.getElementById('dashboard');
+
+    // DOM Elements
+    const elTime = document.getElementById('val-time');
+    const elDate = document.getElementById('val-date');
+    const elAlarm = document.getElementById('val-alarm');
+    const elTemp = document.getElementById('val-temp');
+    const elHum = document.getElementById('val-hum');
+    const elLight = document.getElementById('val-light');
+    const elState = document.getElementById('val-state');
+    const elHints = document.getElementById('val-hints');
+
+    // State Mapping
+    const STATE_NAMES = [
+      "Idle", "Sleep Mode", "Wake Sequence", "Alarm Firing!", "Snoozing", "Post-Sleep Report", "Settings Menu"
+    ];
+
+    const MENU_NAMES = [
+      "Alarm Hour", "Alarm Minute", "Sunrise Duration", "Target Sleep", "Alarm Toggle", "Light Threshold"
+    ];
+
+    let port;
+    let reader;
+
+    async function connectSerial() {
+      if (!('serial' in navigator)) {
+        alert("Web Serial API is not supported in this browser. Please use Google Chrome or Edge.");
+        return;
+      }
+
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+        
+        connectBtn.innerText = "Connected";
+        connectBtn.style.background = "#22c55e"; // Green
+        connectBtn.style.boxShadow = "0 0 20px rgba(34, 197, 94, 0.4)";
+        dashboard.classList.add('active');
+
+        readLoop();
+      } catch (err) {
+        console.error("Error connecting:", err);
+      }
+    }
+
+    async function readLoop() {
+      const textDecoder = new TextDecoderStream();
+      const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+      reader = textDecoder.readable.getReader();
+
+      let buffer = "";
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          
+          buffer += value;
+          let lines = buffer.split('\n');
+          buffer = lines.pop(); // Keep incomplete line in buffer
+
+          for (let line of lines) {
+            line = line.trim();
+            if (line.startsWith('{') && line.endsWith('}')) {
+              try {
+                const data = JSON.parse(line);
+                updateDashboard(data);
+              } catch (e) {
+                console.error("JSON Parse Error:", e, line);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Read loop error:", error);
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
+    function updateDashboard(d) {
+      // Update Time
+      elTime.innerText = d.time;
+      elDate.innerText = d.date;
+
+      // Update Alarm
+      if (d.alarmEn) {
+        const hh = d.alarmH < 10 ? '0'+d.alarmH : d.alarmH;
+        const mm = d.alarmM < 10 ? '0'+d.alarmM : d.alarmM;
+        elAlarm.innerText = `${hh}:${mm} (Sunrise ${d.sunrise}m)`;
+        elAlarm.style.color = 'var(--accent)';
+      } else {
+        elAlarm.innerText = "OFF";
+        elAlarm.style.color = 'var(--text-muted)';
+      }
+
+      // Update Sensors
+      elTemp.innerText = `${d.temp}°C`;
+      elHum.innerText = `${d.hum}%`;
+      const lightDesc = d.light > d.lThresh ? 'Bright' : 'Dark';
+      elLight.innerText = `${d.light} (${lightDesc})`;
+
+      // Update State & Hints
+      const stateId = d.state;
+      elState.innerText = STATE_NAMES[stateId] || "Unknown";
+      
+      let hints = "";
+      if (stateId === 0) { // Idle
+        hints = "PWR to toggle Sleep Mode<br>>|| to enter Settings";
+      } else if (stateId === 1) { // Sleep
+        hints = "Sleep mode active.<br>PWR to exit early.";
+      } else if (stateId === 3) { // Alarm
+        elState.style.color = "#ef4444"; // Red for alarm
+        elState.style.background = "rgba(239, 68, 68, 0.2)";
+        hints = "PWR or >|| to dismiss<br>5 to snooze 5m, 0 to snooze 10m";
+      } else if (stateId === 6) { // Settings
+        hints = `Editing: <span style="color:var(--text-main); font-weight:600;">${MENU_NAMES[d.menu]}</span> (Page ${d.menu+1}/6)<br><br>`;
+        hints += "VOL+/- to adjust value<br>|<< / >>| to change page<br>EQ to Save, STOP to Discard";
+      } else if (stateId === 5) { // Report
+        hints = `Viewing page ${d.report+1}/5<br>|<< / >>| to flip pages<br>STOP to exit`;
+      }
+      
+      // Reset color if not alarm
+      if (stateId !== 3) {
+        elState.style.color = "var(--accent)";
+        elState.style.background = "rgba(56, 189, 248, 0.2)";
+      }
+
+      elHints.innerHTML = hints;
+    }
+
+    connectBtn.addEventListener('click', connectSerial);
+  </script>
+</body>
+</html>

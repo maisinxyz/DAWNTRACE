@@ -84,5 +84,10 @@ pio run -t upload
 
 to do: 
 - Review all features and functionality of sensors
+- Make the HTML page better, make it look nicer.
+
 - Work on todo list for phase 1-4. 
 
+
+open page at google chrome:
+file:///Users/vincee_ong/Desktop/hackathons/DAWNTRACE/dashboard.html
