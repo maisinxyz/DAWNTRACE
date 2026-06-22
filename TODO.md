@@ -89,7 +89,7 @@ file:///Users/vincee_ong/Desktop/hackathons/DAWNTRACE/dashboard.html
 
 To Do:
 Week 1 - 2:
-1. Connect 7 segment display, create 3D casing for alarm clock.
+1. Connect 7 segment display, create 3D casing for alarm clock. (REMOVE THIS AND REWIRE IT WITHOUT 4DIGIT DISPLAY)
     - Make spcaes for White lights, Red light, Humidity sensor, LDR sensor, IR Reciever,Speaker LCD and display.
 2. Research upgrades in electronic components (Light, LDR sensor, Different input method, Different speaker, Different screen)
     - Possibly get a ESP32 and other required electronics too.
