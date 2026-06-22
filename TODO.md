@@ -82,12 +82,20 @@ Wish list:
 use this to run:
 pio run -t upload
 
-to do: 
-- Review all features and functionality of sensors
-- Make the HTML page better, make it look nicer.
-
-- Work on todo list for phase 1-4. 
-
 
 open page at google chrome:
 file:///Users/vincee_ong/Desktop/hackathons/DAWNTRACE/dashboard.html
+
+
+To Do:
+Week 1 - 2:
+1. Connect 7 segment display, create 3D casing for alarm clock.
+    - Make spcaes for White lights, Red light, Humidity sensor, LDR sensor, IR Reciever,Speaker LCD and display.
+2. Research upgrades in electronic components (Light, LDR sensor, Different input method, Different speaker, Different screen)
+    - Possibly get a ESP32 and other required electronics too.
+
+
+Week 3 - 4:
+1. Order parts and make new 3D casing
+2. assemble with new components.
+3. Research how to connect to lamp, or other smart devices.

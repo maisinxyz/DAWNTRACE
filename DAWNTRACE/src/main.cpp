@@ -59,6 +59,15 @@
 // LCD parallel: RS=8, EN=9, D4=10, D5=11, D6=12, D7=13
 #define LDR_PIN          A2
 
+// 74HC595 & 7-Segment Pins
+#define SHIFT_DATA_PIN   10
+#define SHIFT_CLK_PIN    11
+#define SHIFT_LATCH_PIN  A5
+#define DIGIT_1_PIN      A0
+#define DIGIT_2_PIN      A1
+#define DIGIT_3_PIN      A3
+#define DIGIT_4_PIN      A4
+
 // ============================================================================
 //  ELEGOO REMOTE — NEC hex codes
 //  If any button is wrong, open Serial Monitor (9600 baud) and press it;
@@ -256,6 +265,17 @@ unsigned long snoozeEndMs   = 0;
 uint8_t       snoozeMinutes = 0;
 
 // ============================================================================
+//  7-SEGMENT MULTIPLEXING
+// ============================================================================
+const uint8_t digitMap[10] = {
+  0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
+};
+uint8_t currentDigitIndex = 0;
+uint8_t displayDigits[4] = {0, 0, 0, 0};
+bool showColon = false;
+unsigned long lastMultiplexTime = 0;
+
+// ============================================================================
 //  POST-SLEEP REPORT
 // ============================================================================
 uint8_t       reportScreen      = 0;
@@ -356,6 +376,9 @@ void sampleDHT();
 void sampleLDR();
 void bootDiagnostic();
 
+void update7Segment();
+void set7SegmentTime(uint8_t h, uint8_t m);
+
 // ============================================================================
 //  SETUP
 // ============================================================================
@@ -364,6 +387,22 @@ void setup() {
   pinMode(RELAY_PIN,       OUTPUT);
   pinMode(SUNRISE_LED_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN,  OUTPUT);
+
+  pinMode(SHIFT_LATCH_PIN, OUTPUT);
+  pinMode(DIGIT_1_PIN, OUTPUT);
+  pinMode(DIGIT_2_PIN, OUTPUT);
+  pinMode(DIGIT_3_PIN, OUTPUT);
+  pinMode(DIGIT_4_PIN, OUTPUT);
+  // Shared LCD pins
+  pinMode(SHIFT_DATA_PIN, OUTPUT);
+  pinMode(SHIFT_CLK_PIN, OUTPUT);
+
+  digitalWrite(SHIFT_LATCH_PIN, LOW);
+  digitalWrite(DIGIT_1_PIN, HIGH); // Common Cathode, HIGH is OFF
+  digitalWrite(DIGIT_2_PIN, HIGH);
+  digitalWrite(DIGIT_3_PIN, HIGH);
+  digitalWrite(DIGIT_4_PIN, HIGH);
+
   // Note: no joystick pinMode needed — IR receiver is initialised by IRremote
 
   digitalWrite(RELAY_PIN,      LOW);
@@ -426,6 +465,9 @@ void loop() {
   // Soft reset (1) removed as per input mappings
 
   DateTime now = rtc.now();
+
+  set7SegmentTime(now.hour(), now.minute());
+  update7Segment();
 
   // Alarm trigger check runs in idle, sleep, and snooze states
   if (currentState == STATE_IDLE      ||
@@ -1324,34 +1366,18 @@ void sendSerialJSON(DateTime now) {
 void updateClockDisplay(DateTime now) {
   char line1[17], line2[17];
   
-  uint8_t h = now.hour();
-  bool isPM = (h >= 12);
-  uint8_t h12 = h % 12;
-  if (h12 == 0) h12 = 12;
+  // Left-align date, right-align day
+  snprintf(line1, sizeof(line1), "Date: %02d/%02d  %s", 
+           now.month(), now.day(), dayNames[now.dayOfTheWeek()]);
 
-  // Left-align time, right-align day
-  if (h12 >= 10) {
-    snprintf(line1, sizeof(line1), "%d:%02d %s     %s",
-             h12, now.minute(), isPM ? "PM" : "AM", dayNames[now.dayOfTheWeek()]);
-  } else {
-    snprintf(line1, sizeof(line1), "%d:%02d %s      %s",
-             h12, now.minute(), isPM ? "PM" : "AM", dayNames[now.dayOfTheWeek()]);
-  }
-
-  // Left-align date, right-align alarm
+  // Alarm info on line 2
   if (alarmEnabled) {
     uint8_t ah = alarmHour % 12;
     if (ah == 0) ah = 12;
-    if (ah >= 10) {
-      snprintf(line2, sizeof(line2), "%02d/%02d    (%d:%02d)",
-               now.month(), now.day(), ah, alarmMinute);
-    } else {
-      snprintf(line2, sizeof(line2), "%02d/%02d     (%d:%02d)",
-               now.month(), now.day(), ah, alarmMinute);
-    }
+    bool aPM = (alarmHour >= 12);
+    snprintf(line2, sizeof(line2), "Alarm: %d:%02d%s  ", ah, alarmMinute, aPM ? "PM" : "AM");
   } else {
-    snprintf(line2, sizeof(line2), "%02d/%02d    ALM:OFF",
-             now.month(), now.day());
+    snprintf(line2, sizeof(line2), "Alarm: OFF      ");
   }
 
   lcd.setCursor(0, 0); lcd.print(line1);
@@ -1360,7 +1386,7 @@ void updateClockDisplay(DateTime now) {
 
 void updateSleepDisplay(DateTime dt) {
   char line1[17], line2[17];
-  snprintf(line1, sizeof(line1), "   %02d:%02d  ZZZ  ", dt.hour(), dt.minute());
+  snprintf(line1, sizeof(line1), "   Sleep Mode   ");
   if (sampleCount > 0) {
     snprintf(line2, sizeof(line2), "%dC %d%% L:%d     ", avgTemp, avgHum, lightEventCount);
   } else {
@@ -1526,4 +1552,54 @@ void bootDiagnostic() {
   lcd.setCursor(0, 1);
   lcd.print(F("Press any button"));
   delay(2000);
+}
+
+// ============================================================================
+//  7-SEGMENT MULTIPLEXING
+// ============================================================================
+void update7Segment() {
+  if (millis() - lastMultiplexTime < 3) return; // Multiplex interval ~3ms per digit
+  lastMultiplexTime = millis();
+
+  // 1. Turn off all digits to prevent ghosting
+  digitalWrite(DIGIT_1_PIN, HIGH);
+  digitalWrite(DIGIT_2_PIN, HIGH);
+  digitalWrite(DIGIT_3_PIN, HIGH);
+  digitalWrite(DIGIT_4_PIN, HIGH);
+
+  currentDigitIndex = (currentDigitIndex + 1) % 4;
+
+  // 2. Prepare segment data
+  uint8_t segments = displayDigits[currentDigitIndex];
+  
+  // Flash colon on digit 2 (index 1)
+  if (currentDigitIndex == 1 && showColon) {
+    segments |= 0x80; // Turn on DP (bit 7)
+  }
+
+  // 3. Shift out data to 74HC595
+  digitalWrite(SHIFT_LATCH_PIN, LOW);
+  shiftOut(SHIFT_DATA_PIN, SHIFT_CLK_PIN, MSBFIRST, segments);
+  digitalWrite(SHIFT_LATCH_PIN, HIGH);
+
+  // 4. Turn on the current digit
+  if (currentDigitIndex == 0) digitalWrite(DIGIT_1_PIN, LOW);
+  else if (currentDigitIndex == 1) digitalWrite(DIGIT_2_PIN, LOW);
+  else if (currentDigitIndex == 2) digitalWrite(DIGIT_3_PIN, LOW);
+  else if (currentDigitIndex == 3) digitalWrite(DIGIT_4_PIN, LOW);
+}
+
+void set7SegmentTime(uint8_t h, uint8_t m) {
+  uint8_t h12 = h % 12;
+  if (h12 == 0) h12 = 12;
+
+  if (h12 >= 10) displayDigits[0] = digitMap[h12 / 10];
+  else displayDigits[0] = 0; // Blank leading zero
+
+  displayDigits[1] = digitMap[h12 % 10];
+  displayDigits[2] = digitMap[m / 10];
+  displayDigits[3] = digitMap[m % 10];
+
+  // Blink colon every 1000ms
+  showColon = (millis() % 1000) < 500;
 }
