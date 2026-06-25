@@ -93,7 +93,7 @@
 // ============================================================================
 #define SUNRISE_DEFAULT_MINUTES  20
 #define SLEEP_DEBT_TARGET_HOURS   8
-#define LDR_THRESHOLD           400
+#define LDR_THRESHOLD           100
 
 #define SNOOZE_5_MIN   5
 #define SNOOZE_10_MIN 10
@@ -938,24 +938,24 @@ void drawMenuPage() {
   switch (currentMenuPage) {
 
     case MENU_ALARM_HOUR:
-      lcd.setCursor(0, 0); lcd.print(F("Alarm Hr   [1/6]"));
+    case MENU_ALARM_MIN: {
+      lcd.setCursor(0, 0); 
+      if (currentMenuPage == MENU_ALARM_HOUR) lcd.print(F("Alarm Hr   [1/6]"));
+      else                                    lcd.print(F("Alarm Min  [2/6]"));
+      
+      uint8_t h12 = menuAlarmHour % 12;
+      if (h12 == 0) h12 = 12;
+      bool isPM = (menuAlarmHour >= 12);
+      
       lcd.setCursor(0, 1);
       lcd.print(F("["));
-      lcd.print(menuAlarmHour < 10 ? "0" : ""); lcd.print(menuAlarmHour);
+      lcd.print(h12 < 10 ? "0" : ""); lcd.print(h12);
       lcd.print(F(":"));
       lcd.print(menuAlarmMin  < 10 ? "0" : ""); lcd.print(menuAlarmMin);
-      lcd.print(F("]  EQ:Save"));
+      lcd.print(isPM ? F("P") : F("A"));
+      lcd.print(F("] EQ:Save "));
       break;
-
-    case MENU_ALARM_MIN:
-      lcd.setCursor(0, 0); lcd.print(F("Alarm Min  [2/6]"));
-      lcd.setCursor(0, 1);
-      lcd.print(F("["));
-      lcd.print(menuAlarmHour < 10 ? "0" : ""); lcd.print(menuAlarmHour);
-      lcd.print(F(":"));
-      lcd.print(menuAlarmMin  < 10 ? "0" : ""); lcd.print(menuAlarmMin);
-      lcd.print(F("]  EQ:Save"));
-      break;
+    }
 
     case MENU_SUNRISE_DUR:
       lcd.setCursor(0, 0); lcd.print(F("SunriseDur [3/6]"));
@@ -1287,12 +1287,17 @@ void sendSerialJSON(DateTime now) {
   int l = analogRead(LDR_PIN);
 
   // Send JSON string directly using F() to save RAM
+  uint8_t h12 = now.hour() % 12;
+  if (h12 == 0) h12 = 12;
+  bool isPM = (now.hour() >= 12);
+  
   Serial.print(F("{\"time\":\""));
-  if (now.hour() < 10) Serial.print('0');
-  Serial.print(now.hour());
+  if (h12 < 10) Serial.print('0');
+  Serial.print(h12);
   Serial.print(':');
   if (now.minute() < 10) Serial.print('0');
   Serial.print(now.minute());
+  Serial.print(isPM ? F(" PM") : F(" AM"));
   
   Serial.print(F("\",\"date\":\""));
   Serial.print(now.year());
@@ -1326,18 +1331,22 @@ void sendSerialJSON(DateTime now) {
 void updateClockDisplay(DateTime now) {
   char line1[17], line2[17];
   
-  // Left-align date, right-align day
-  snprintf(line1, sizeof(line1), "Date: %02d/%02d  %s", 
-           now.month(), now.day(), dayNames[now.dayOfTheWeek()]);
+  uint8_t h12 = now.hour() % 12;
+  if (h12 == 0) h12 = 12;
+  bool isPM = (now.hour() >= 12);
+  
+  snprintf(line1, sizeof(line1), "%02d:%02d:%02d %s %s", 
+           h12, now.minute(), now.second(), isPM ? "PM" : "AM", dayNames[now.dayOfTheWeek()]);
 
-  // Alarm info on line 2
   if (alarmEnabled) {
     uint8_t ah = alarmHour % 12;
     if (ah == 0) ah = 12;
     bool aPM = (alarmHour >= 12);
-    snprintf(line2, sizeof(line2), "Alarm: %d:%02d%s  ", ah, alarmMinute, aPM ? "PM" : "AM");
+    snprintf(line2, sizeof(line2), "%02d/%02d A:%d:%02d%s ", 
+             now.month(), now.day(), ah, alarmMinute, aPM ? "p" : "a");
   } else {
-    snprintf(line2, sizeof(line2), "Alarm: OFF      ");
+    snprintf(line2, sizeof(line2), "%02d/%02d A:OFF    ", 
+             now.month(), now.day());
   }
 
   lcd.setCursor(0, 0); lcd.print(line1);
@@ -1346,7 +1355,12 @@ void updateClockDisplay(DateTime now) {
 
 void updateSleepDisplay(DateTime dt) {
   char line1[17], line2[17];
-  snprintf(line1, sizeof(line1), "   Sleep Mode   ");
+  
+  uint8_t h12 = dt.hour() % 12;
+  if (h12 == 0) h12 = 12;
+  bool isPM = (dt.hour() >= 12);
+  
+  snprintf(line1, sizeof(line1), " %02d:%02d %s ZZZ  ", h12, dt.minute(), isPM ? "PM" : "AM");
   if (sampleCount > 0) {
     snprintf(line2, sizeof(line2), "%dC %d%% L:%d     ", avgTemp, avgHum, lightEventCount);
   } else {
