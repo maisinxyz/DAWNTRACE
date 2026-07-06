@@ -93,17 +93,21 @@
 // ============================================================================
 #define SUNRISE_DEFAULT_MINUTES  20
 #define SLEEP_DEBT_TARGET_HOURS   8
-#define LDR_THRESHOLD           100
+#define LDR_THRESHOLD           300
+#define LDR_OFFSET              400
 
 #define SNOOZE_5_MIN   5
 #define SNOOZE_10_MIN 10
 
 // Alarm melody note frequencies (Hz)
 #define NOTE_C5  523
+#define NOTE_D5  587
 #define NOTE_E5  659
+#define NOTE_F5  698
 #define NOTE_G5  784
 #define NOTE_A5  880
 #define NOTE_B5  988
+#define NOTE_C6  1047
 
 #define DHT_TYPE DHT11
 
@@ -119,9 +123,10 @@
 #define EEPROM_ALARM_VOLUME  0x0006
 #define EEPROM_LDR_THRESH_H  0x0007
 #define EEPROM_LDR_THRESH_L  0x0008
-// 0x0009 reserved
+// 0x0009 reserved (brownout flag)
 #define EEPROM_LOG_START     0x000A  // 30 × 8 = 240 bytes
 #define EEPROM_LOG_INDEX     0x00FA
+#define EEPROM_TIMEZONE_OFFSET 0x00FB
 #define EEPROM_MAGIC_VALUE   0xDA
 
 // ============================================================================
@@ -134,7 +139,8 @@ enum DeviceState {
   STATE_ALARM_ACTIVE,
   STATE_POST_SLEEP_REPORT,
   STATE_SETTINGS_MENU,
-  STATE_SNOOZE            // new in Phase 9
+  STATE_SNOOZE,           // new in Phase 9
+  STATE_SANDBOX
 };
 
 enum MenuPage {
@@ -144,8 +150,16 @@ enum MenuPage {
   MENU_TARGET_SLEEP,
   MENU_ALARM_TOGGLE,
   MENU_LDR_THRESH,
+  MENU_TIMEZONE,
   MENU_SAVE_EXIT,
   MENU_PAGE_COUNT
+};
+
+enum SandboxPage {
+  SANDBOX_LDR = 0,
+  SANDBOX_SUNRISE,
+  SANDBOX_ALARM,
+  SANDBOX_PAGE_COUNT
 };
 
 // ============================================================================
@@ -165,6 +179,7 @@ uint8_t  sunriseDuration  = SUNRISE_DEFAULT_MINUTES;
 uint8_t  targetSleepHours = SLEEP_DEBT_TARGET_HOURS;
 uint8_t  alarmVolume      = 3;
 uint16_t ldrThreshold     = LDR_THRESHOLD;
+int8_t   timeZoneOffset   = 0;
 
 // Temp copies used inside the settings menu
 uint8_t  menuAlarmHour;
@@ -173,6 +188,7 @@ uint8_t  menuSunriseDur;
 uint8_t  menuTargetSleep;
 bool     menuAlarmEnabled;
 uint16_t menuLdrThresh;
+int8_t   menuTimeZone;
 
 // Direct digit-entry state (alarm hour / minute pages only)
 uint8_t  digitFirst = 255;   // 255 = no digit pending
@@ -182,6 +198,16 @@ uint8_t  digitFirst = 255;   // 255 = no digit pending
 // ============================================================================
 DeviceState currentState    = STATE_IDLE;
 MenuPage    currentMenuPage = MENU_ALARM_HOUR;
+SandboxPage currentSandboxPage = SANDBOX_LDR;
+
+// Sandbox state variables
+uint16_t sandboxLightCounter = 0;
+bool     sandboxLightWasAbove = false;
+uint8_t  sandboxSunriseSeconds = 10;
+uint8_t  sandboxAlarmSeconds = 5;
+bool     sandboxTestActive = false;
+unsigned long sandboxTestStartMs = 0;
+bool     sandboxAlarmCountingDown = false;
 
 unsigned long lastDisplayUpdate = 0;
 const unsigned long DISPLAY_INTERVAL = 1000UL;
@@ -244,8 +270,7 @@ unsigned long sunriseTotalMs  = 0;
 bool          alarmFiring     = false;
 unsigned long alarmStartMs    = 0;
 
-const unsigned long STAGE2_MS = 120000UL;
-const unsigned long STAGE3_MS = 300000UL;
+// 3-stage alarm removed, playing single 10s melody repeatedly
 
 uint8_t lastAlarmFiredDay = 255;
 
@@ -280,34 +305,20 @@ struct SleepEntry {
 SleepEntry sleepLog[30];
 uint8_t    logIndex = 0;
 
+uint16_t getCalibratedLDR() {
+  int raw = analogRead(LDR_PIN);
+  int cal = raw - LDR_OFFSET;
+  if (cal < 0) cal = 0;
+  if (cal > 1023) cal = 1023;
+  return (uint16_t)cal;
+}
+
 const char dayNames[7][4] = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
 
 // ============================================================================
-//  ALARM MELODY  (stage tables identical to original)
+//  ALARM MELODY
 // ============================================================================
-const uint16_t stage1Notes[][2] = {
-  {NOTE_C5, 200}, {NOTE_E5, 200}, {NOTE_G5, 400}
-};
-const uint8_t  STAGE1_NOTE_COUNT = 3;
-const uint16_t STAGE1_GAP_MS     = 10000;
-
-const uint16_t stage2Notes[][2] = {
-  {NOTE_C5, 250}, {NOTE_E5, 250}, {NOTE_G5, 500}
-};
-const uint8_t  STAGE2_NOTE_COUNT = 3;
-const uint16_t STAGE2_GAP_MS     = 5000;
-
-const uint16_t stage3Notes[][2] = {
-  {NOTE_G5, 100}, {NOTE_A5, 100}, {NOTE_B5, 100}
-};
-const uint8_t STAGE3_NOTE_COUNT = 3;
-
-struct MelodyState {
-  uint8_t       noteIdx;
-  uint8_t       stage;
-  bool          inGap;
-  unsigned long nextTime;
-} melody;
+// Alarm tune removed in favor of a single 3-second beep
 
 // ============================================================================
 //  FORWARD DECLARATIONS
@@ -327,6 +338,7 @@ void handleWakeSequence();
 void handleAlarmActive();
 void handlePostSleepReport();
 void handleSettingsMenu();
+void handleSandboxState();
 
 void enterSleepMode(DateTime now);
 void exitSleepMode(DateTime now);
@@ -340,6 +352,7 @@ void updateClockDisplay(DateTime now);
 void updateSleepDisplay(DateTime now);
 void showReportScreen(uint8_t screen);
 void drawMenuPage();
+void drawSandboxPage();
 void sendSerialJSON(DateTime now);
 
 void updateSunriseLED();
@@ -386,15 +399,21 @@ void setup() {
   // which is shared with our LCD D7 data line.
   IrReceiver.begin(IR_RECEIVE_PIN, DISABLE_LED_FEEDBACK);
 
+  // RTC_Millis is a software clock — it resets on every power cycle.
+  // Always set to compile time on boot so the clock starts near-correct
+  // after each fresh upload.
   rtc.begin(DateTime(F(__DATE__), F(__TIME__)));
-  Serial.println(F("Software RTC initialized"));
-  Serial.println(F("RTC init"));
+  Serial.println(F("Software RTC initialized (compile time)"));
 
   dht.begin();
 
   initEEPROM();
   loadSettings();
   loadSleepLog();
+  
+  if (timeZoneOffset != 0) {
+    rtc.adjust(rtc.now() + TimeSpan((int32_t)timeZoneOffset * 3600L));
+  }
 
   analogWrite(STATUS_LED_PIN, 120);
   delay(400);
@@ -456,11 +475,22 @@ void loop() {
         menuTargetSleep  = targetSleepHours;
         menuAlarmEnabled = alarmEnabled;
         menuLdrThresh    = ldrThreshold;
+        menuTimeZone     = timeZoneOffset;
         currentMenuPage  = MENU_ALARM_HOUR;
         digitFirst       = 255;
         currentState     = STATE_SETTINGS_MENU;
         lcd.clear();
         drawMenuPage();
+      }
+      // '9': Enter Sandbox Mode
+      if (evtDigit && evtDigitVal == 9) {
+        currentState = STATE_SANDBOX;
+        currentSandboxPage = SANDBOX_LDR;
+        sandboxLightCounter = 0;
+        sandboxLightWasAbove = false;
+        sandboxTestActive = false;
+        lcd.clear();
+        drawSandboxPage();
       }
       break;
 
@@ -536,6 +566,10 @@ void loop() {
     // ── SETTINGS MENU ─────────────────────────────────────────────────────
     case STATE_SETTINGS_MENU:
       handleSettingsMenu();
+      break;
+
+    case STATE_SANDBOX:
+      handleSandboxState();
       break;
   }
 
@@ -682,6 +716,8 @@ void loadSettings() {
   uint8_t ldrH     = EEPROM.read(EEPROM_LDR_THRESH_H);
   uint8_t ldrL     = EEPROM.read(EEPROM_LDR_THRESH_L);
   ldrThreshold     = ((uint16_t)ldrH << 8) | ldrL;
+  timeZoneOffset   = (int8_t)EEPROM.read(EEPROM_TIMEZONE_OFFSET);
+  if (timeZoneOffset < -12 || timeZoneOffset > 14) timeZoneOffset = 0;
 
   if (alarmHour    > 23)  alarmHour    = 7;
   if (alarmMinute  > 59)  alarmMinute  = 0;
@@ -722,6 +758,7 @@ void saveSettings() {
   EEPROM.update(EEPROM_ALARM_VOLUME,  alarmVolume);
   EEPROM.update(EEPROM_LDR_THRESH_H,  (uint8_t)(ldrThreshold >> 8));
   EEPROM.update(EEPROM_LDR_THRESH_L,  (uint8_t)(ldrThreshold & 0xFF));
+  EEPROM.update(EEPROM_TIMEZONE_OFFSET, (uint8_t)timeZoneOffset);
   Serial.println(F("Settings saved to EEPROM"));
 }
 
@@ -875,6 +912,8 @@ void handleSettingsMenu() {
         menuAlarmEnabled = !menuAlarmEnabled; break;
       case MENU_LDR_THRESH:
         menuLdrThresh   = (uint16_t)constrain((int)menuLdrThresh  + dir * 50, 50, 950); break;
+      case MENU_TIMEZONE:
+        menuTimeZone    = (int8_t)constrain((int)menuTimeZone + dir, -12, 14); break;
       default: break;
     }
     redraw = true;
@@ -906,6 +945,13 @@ void handleSettingsMenu() {
     targetSleepHours = menuTargetSleep;
     alarmEnabled     = menuAlarmEnabled;
     ldrThreshold     = menuLdrThresh;
+    
+    if (menuTimeZone != timeZoneOffset) {
+      int8_t diff = menuTimeZone - timeZoneOffset;
+      rtc.adjust(rtc.now() + TimeSpan((int32_t)diff * 3600L));
+      timeZoneOffset = menuTimeZone;
+    }
+    
     saveSettings();
     lastAlarmFiredDay = 255;   // let new alarm time take effect tonight
 
@@ -933,6 +979,174 @@ void handleSettingsMenu() {
   if (redraw) drawMenuPage();
 }
 
+void handleSandboxState() {
+  bool redraw = false;
+  unsigned long now = millis();
+
+  // If a test is active, process test logic
+  if (sandboxTestActive) {
+    if (currentSandboxPage == SANDBOX_SUNRISE) {
+      if (now - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+        lastDisplayUpdate = now;
+        unsigned long elapsed = now - sandboxTestStartMs;
+        unsigned long totalMs = sandboxSunriseSeconds * 1000UL;
+        uint8_t pct = (elapsed >= totalMs) ? 100 : (uint8_t)((elapsed * 100UL) / totalMs);
+        
+        char line[17];
+        snprintf(line, sizeof(line), "Testing: %3d%%  ", pct);
+        lcd.setCursor(0, 1);
+        lcd.print(line);
+      }
+
+      static unsigned long lastSunriseLedUpdate = 0;
+      if (now - lastSunriseLedUpdate >= 50) {
+        lastSunriseLedUpdate = now;
+        unsigned long elapsed = now - sandboxTestStartMs;
+        unsigned long totalMs = sandboxSunriseSeconds * 1000UL;
+        if (elapsed >= totalMs) {
+          analogWrite(SUNRISE_LED_PIN, 255);
+          sandboxTestActive = false;
+          redraw = true;
+        } else {
+          float p = (float)elapsed / (float)totalMs;
+          float ease = p * p; // quadratic ease-in
+          int val = (int)(ease * 255.0f);
+          if (val < 0) val = 0;
+          if (val > 255) val = 255;
+          analogWrite(SUNRISE_LED_PIN, val);
+        }
+      }
+    } 
+    else if (currentSandboxPage == SANDBOX_ALARM) {
+      if (sandboxAlarmCountingDown) {
+        if (now - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+          lastDisplayUpdate = now;
+          unsigned long remaining = (sandboxTestStartMs + (sandboxAlarmSeconds * 1000UL) - now) / 1000UL;
+          char line[17];
+          snprintf(line, sizeof(line), "Starts in: %02ds", (int)remaining);
+          lcd.setCursor(0, 1);
+          lcd.print(line);
+        }
+
+        unsigned long totalMs = sandboxAlarmSeconds * 1000UL;
+        if (now - sandboxTestStartMs >= totalMs) {
+          sandboxAlarmCountingDown = false;
+          sandboxTestStartMs = now;
+          alarmStartMs = now;
+          
+          lcd.setCursor(0, 1);
+          lcd.print(F("Testing: ALARM! "));
+        }
+      } else {
+        updateAlarmMelody();
+        
+        if (now - sandboxTestStartMs >= 10000UL) {
+          sandboxTestActive = false;
+          stopAlarmSounds();
+          redraw = true;
+        }
+      }
+    }
+  } else {
+    if (currentSandboxPage == SANDBOX_LDR) {
+      if (now - lastDisplayUpdate >= 500) {
+        lastDisplayUpdate = now;
+        uint16_t currentLdr = getCalibratedLDR();
+        
+        if (currentLdr > ldrThreshold) {
+          if (!sandboxLightWasAbove) {
+            sandboxLightWasAbove = true;
+            sandboxLightCounter++;
+          }
+        } else {
+          sandboxLightWasAbove = false;
+        }
+
+        char line1[17], line2[17];
+        snprintf(line1, sizeof(line1), "LDR: %4d /%4d", currentLdr, ldrThreshold);
+        snprintf(line2, sizeof(line2), "Count: %3d      ", sandboxLightCounter);
+        lcd.setCursor(0, 0); lcd.print(line1);
+        lcd.setCursor(0, 1); lcd.print(line2);
+      }
+    }
+  }
+
+  // Input Handling
+  if (sandboxTestActive && (evtStop || evtOK || evtPower)) {
+    sandboxTestActive = false;
+    analogWrite(SUNRISE_LED_PIN, 0);
+    stopAlarmSounds();
+    redraw = true;
+    evtOK = false;
+    evtStop = false;
+  }
+
+  if (!sandboxTestActive) {
+    if (evtRight || evtLeft) {
+      if (evtRight) {
+        currentSandboxPage = (SandboxPage)(((uint8_t)currentSandboxPage + 1) % SANDBOX_PAGE_COUNT);
+      } else {
+        if ((uint8_t)currentSandboxPage == 0) currentSandboxPage = (SandboxPage)(SANDBOX_PAGE_COUNT - 1);
+        else currentSandboxPage = (SandboxPage)((uint8_t)currentSandboxPage - 1);
+      }
+      redraw = true;
+    }
+
+    if (evtUp || evtDown) {
+      int dir = evtUp ? 1 : -1;
+      if (currentSandboxPage == SANDBOX_SUNRISE) {
+        sandboxSunriseSeconds = (uint8_t)constrain((int)sandboxSunriseSeconds + dir * 5, 5, 60);
+      } else if (currentSandboxPage == SANDBOX_ALARM) {
+        sandboxAlarmSeconds = (uint8_t)constrain((int)sandboxAlarmSeconds + dir, 3, 10);
+      }
+      redraw = true;
+    }
+
+    if (evtOK && currentSandboxPage != SANDBOX_LDR) {
+      sandboxTestActive = true;
+      sandboxTestStartMs = now;
+      if (currentSandboxPage == SANDBOX_ALARM) {
+        sandboxAlarmCountingDown = true;
+      } else if (currentSandboxPage == SANDBOX_SUNRISE) {
+        analogWrite(SUNRISE_LED_PIN, 0);
+      }
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("Test Running... "));
+      lastDisplayUpdate = 0; // force update
+    }
+  }
+
+  if (!sandboxTestActive && (evtStop || evtPower)) {
+    analogWrite(SUNRISE_LED_PIN, 0);
+    stopAlarmSounds();
+    lcd.clear();
+    currentState = STATE_IDLE;
+    lastDisplayUpdate = 0;
+    return;
+  }
+
+  if (redraw && !sandboxTestActive) drawSandboxPage();
+}
+
+void drawSandboxPage() {
+  lcd.clear();
+  switch (currentSandboxPage) {
+    case SANDBOX_LDR:
+      lastDisplayUpdate = 0; 
+      break;
+    case SANDBOX_SUNRISE:
+      lcd.setCursor(0, 0); lcd.print(F("Sunrs Tst: ")); lcd.print(sandboxSunriseSeconds); lcd.print(F("s"));
+      lcd.setCursor(0, 1); lcd.print(F("OK:Start Up/Dn:T"));
+      break;
+    case SANDBOX_ALARM:
+      lcd.setCursor(0, 0); lcd.print(F("Alarm Tst: ")); lcd.print(sandboxAlarmSeconds); lcd.print(F("s"));
+      lcd.setCursor(0, 1); lcd.print(F("OK:Start Up/Dn:T"));
+      break;
+    default: break;
+  }
+}
+
 void drawMenuPage() {
   lcd.clear();
   switch (currentMenuPage) {
@@ -940,8 +1154,8 @@ void drawMenuPage() {
     case MENU_ALARM_HOUR:
     case MENU_ALARM_MIN: {
       lcd.setCursor(0, 0); 
-      if (currentMenuPage == MENU_ALARM_HOUR) lcd.print(F("Alarm Hr   [1/6]"));
-      else                                    lcd.print(F("Alarm Min  [2/6]"));
+      if (currentMenuPage == MENU_ALARM_HOUR) lcd.print(F("Alarm Hr   [1/7]"));
+      else                                    lcd.print(F("Alarm Min  [2/7]"));
       
       uint8_t h12 = menuAlarmHour % 12;
       if (h12 == 0) h12 = 12;
@@ -958,21 +1172,21 @@ void drawMenuPage() {
     }
 
     case MENU_SUNRISE_DUR:
-      lcd.setCursor(0, 0); lcd.print(F("SunriseDur [3/6]"));
+      lcd.setCursor(0, 0); lcd.print(F("SunriseDur [3/7]"));
       lcd.setCursor(0, 1);
       lcd.print(F("[")); lcd.print(menuSunriseDur);
       lcd.print(F(" m]  EQ:Save"));
       break;
 
     case MENU_TARGET_SLEEP:
-      lcd.setCursor(0, 0); lcd.print(F("Targ Sleep [4/6]"));
+      lcd.setCursor(0, 0); lcd.print(F("Targ Sleep [4/7]"));
       lcd.setCursor(0, 1);
       lcd.print(F("[")); lcd.print(menuTargetSleep);
       lcd.print(F(" hr] EQ:Save"));
       break;
 
     case MENU_ALARM_TOGGLE:
-      lcd.setCursor(0, 0); lcd.print(F("AlarmEnabld[5/6]"));
+      lcd.setCursor(0, 0); lcd.print(F("AlarmEnabld[5/7]"));
       lcd.setCursor(0, 1);
       lcd.print(F("["));
       lcd.print(menuAlarmEnabled ? F("ON ") : F("OFF"));
@@ -980,10 +1194,19 @@ void drawMenuPage() {
       break;
 
     case MENU_LDR_THRESH:
-      lcd.setCursor(0, 0); lcd.print(F("LightThresh[6/6]"));
+      lcd.setCursor(0, 0); lcd.print(F("LightThresh[6/7]"));
       lcd.setCursor(0, 1);
       lcd.print(F("[")); lcd.print(menuLdrThresh);
       lcd.print(F("]    EQ:Save"));
+      break;
+
+    case MENU_TIMEZONE:
+      lcd.setCursor(0, 0); lcd.print(F("Time Offset[7/7]"));
+      lcd.setCursor(0, 1);
+      lcd.print(F("[")); 
+      if (menuTimeZone > 0) lcd.print(F("+"));
+      lcd.print(menuTimeZone);
+      lcd.print(F(" hr] EQ:Save"));
       break;
 
     case MENU_SAVE_EXIT:
@@ -1050,10 +1273,6 @@ void startSunrise(DateTime now) {
 void startAlarm() {
   alarmFiring      = true;
   alarmStartMs     = millis();
-  melody.stage     = 0;
-  melody.noteIdx   = 0;
-  melody.inGap     = false;
-  melody.nextTime  = 0;
   digitalWrite(RELAY_PIN, HIGH);
   analogWrite(SUNRISE_LED_PIN, 255);
   currentState     = STATE_ALARM_ACTIVE;
@@ -1115,6 +1334,10 @@ void triggerSnooze(uint8_t minutes, DateTime now) {
 //  SUNRISE LED — cosine ease-in  (original algorithm)
 // ============================================================================
 void updateSunriseLED() {
+  static unsigned long lastSunriseLedUpdate = 0;
+  if (millis() - lastSunriseLedUpdate < 50) return;
+  lastSunriseLedUpdate = millis();
+
   unsigned long elapsed = millis() - sunriseStartMs;
   if (elapsed > sunriseTotalMs) elapsed = sunriseTotalMs;
   float progress   = (float)elapsed / (float)sunriseTotalMs;
@@ -1124,66 +1347,20 @@ void updateSunriseLED() {
 }
 
 // ============================================================================
-//  ALARM MELODY — 3 stages  (logic identical to original)
+//  ALARM MELODY (Single Beep)
 // ============================================================================
 void updateAlarmMelody() {
   unsigned long elapsed = millis() - alarmStartMs;
-  uint8_t newStage;
-  if      (elapsed < STAGE2_MS) newStage = 1;
-  else if (elapsed < STAGE3_MS) newStage = 2;
-  else                           newStage = 3;
-
-  if (newStage != melody.stage) {
-    melody.stage    = newStage;
-    melody.noteIdx  = 0;
-    melody.inGap    = false;
-    melody.nextTime = millis();
-    Serial.print(F("Alarm Stage ")); Serial.println(newStage);
-  }
-
-  if (millis() < melody.nextTime) return;
-
-  if (melody.stage == 1) {
-    if (melody.inGap) { melody.inGap = false; melody.noteIdx = 0; }
-    uint16_t freq = stage1Notes[melody.noteIdx][0];
-    uint16_t dur  = stage1Notes[melody.noteIdx][1];
-    myTone(BUZZER_PIN, freq, dur);
-    melody.noteIdx++;
-    if (melody.noteIdx >= STAGE1_NOTE_COUNT) {
-      melody.inGap = true; melody.noteIdx = 0;
-      melody.nextTime = millis() + STAGE1_GAP_MS;
-    } else {
-      melody.nextTime = millis() + 20;
-    }
-  }
-  else if (melody.stage == 2) {
-    if (melody.inGap) { melody.inGap = false; melody.noteIdx = 0; }
-    uint16_t freq = stage2Notes[melody.noteIdx][0];
-    uint16_t dur  = stage2Notes[melody.noteIdx][1];
-    myTone(BUZZER_PIN, freq, dur);
-    melody.noteIdx++;
-    if (melody.noteIdx >= STAGE2_NOTE_COUNT) {
-      melody.inGap = true; melody.noteIdx = 0;
-      melody.nextTime = millis() + STAGE2_GAP_MS;
-    } else {
-      melody.nextTime = millis() + 20;
-    }
-  }
-  else {
-    // Stage 3 — continuous rapid loop
-    uint16_t freq = stage3Notes[melody.noteIdx][0];
-    uint16_t dur  = stage3Notes[melody.noteIdx][1];
-    myTone(BUZZER_PIN, freq, dur);
-    melody.noteIdx  = (melody.noteIdx + 1) % STAGE3_NOTE_COUNT;
-    melody.nextTime = millis() + 10;
+  if (elapsed < 3000) {
+    myTone(BUZZER_PIN, 1000, 20); // Play a continuous beep chunked in 20ms intervals
+  } else {
+    alarmFiring = false;
+    analogWrite(SUNRISE_LED_PIN, 0); // Turn off the alarm completely to stop the beep
   }
 }
 
 void stopAlarmSounds() {
-  melody.stage    = 0;
-  melody.noteIdx  = 0;
-  melody.inGap    = false;
-  melody.nextTime = 0;
+  // Empty, no state to reset for the single beep
 }
 
 void myTone(uint8_t pin, unsigned int frequency, unsigned long duration) {
@@ -1264,7 +1441,7 @@ void sampleDHT() {
 }
 
 void sampleLDR() {
-  int ldrVal = analogRead(LDR_PIN);
+  int ldrVal = (int)getCalibratedLDR();
   if ((millis() - sleepModeEnteredAt) < LDR_GRACE_PERIOD) {
     Serial.print(F("LDR=")); Serial.print(ldrVal); Serial.println(F(" (grace)"));
     return;
@@ -1284,7 +1461,7 @@ void sendSerialJSON(DateTime now) {
   // Read sensors
   float t = dht.readTemperature();
   float h_hum = dht.readHumidity();
-  int l = analogRead(LDR_PIN);
+  int l = (int)getCalibratedLDR();
 
   // Send JSON string directly using F() to save RAM
   uint8_t h12 = now.hour() % 12;
@@ -1507,7 +1684,7 @@ void bootDiagnostic() {
   delay(800);
   float t   = dht.readTemperature();
   float h   = dht.readHumidity();
-  int   ldr = analogRead(LDR_PIN);
+  int   ldr = (int)getCalibratedLDR();
 
   lcd.clear();
   if (isnan(t) || isnan(h)) {
